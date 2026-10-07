@@ -2,8 +2,11 @@
 
 A personal positive-expected-value bet finder, similar in spirit to OddsJam's +EV tool. It pulls odds
 from [The Odds API v4](https://the-odds-api.com/liveapi/guides/v4/) and works out fair (no-vig)
-probabilities from Pinnacle, then Novig, then a market consensus. It then flags prices at your books
-that beat fair value. Novig is used as a reference only and never appears as a bet. It covers main markets for NFL, NCAAF, NBA, NHL, MLB and
+probabilities from per-market-type reference books: Pinnacle → Bookmaker → Circa for main lines and
+FanDuel → DraftKings → Circa for player props, then Novig as a last resort, then a market consensus.
+Bookmaker and Circa aren't on The Odds API today, so they are skipped until the API adds them. It then
+flags prices at your books that beat fair value. Novig is used as a reference only and never appears
+as a bet. It covers main markets for NFL, NCAAF, NBA, NHL, MLB and
 WNBA, plus player props. Pick'em apps (PrizePicks, Pick6, Underdog, Dabble) are compared against each
 app's own break-even rate, and the sweepstakes sportsbooks Fliff and Courtside are handled like any
 other book. See `COVERAGE.md` for what The Odds API covers.
@@ -36,7 +39,7 @@ Outputs:
 | `--sports nfl,ncaaf,...` | sports aliases from `[sport_keys]` in the config (any raw Odds API sport key also works) |
 | `--min-ev 1` | EV% threshold (default from config: 1%) |
 | `--devig power\|multiplicative` | how vig is removed (default: power) |
-| `--ref-mode priority\|blend` | Pinnacle, then Novig (default), or the average of both |
+| `--ref-mode blend\|first` | blend = priority-weighted average of the references with the line (default); first = highest-priority reference sets the price |
 | `--books draftkings,fanduel` | show only these target books |
 | `--props` | also scan player props (per-event calls) |
 | `--props-sports nfl` | which sports to pull props for (default: same as `--sports`) |
@@ -53,15 +56,19 @@ Outputs:
 Every bet row in `report.html` expands. Tap the row or its ▸ chevron and a detail panel opens
 directly below it. The panel covers that exact market, selection and line:
 
-- **Header:** fair odds (American and %), the reference that set it (pinnacle / novig / blend /
-  consensus), and the reference's raw two-way prices.
+- **Header:** fair odds (American and %), the reference that set it (one book, `blend(a+b)` or
+  `consensus(n)`), and each reference's raw two-way prices with its share of the blend.
 - **One row per book that priced it:**
   - American odds for this side, plus the opposite side when the book lists it.
   - Implied probability.
   - EV% against the fair price.
 - **Labels:**
-  - Pinnacle and Novig are labelled **"reference, not bettable"**. Novig never appears as a bet
-    row or the best price.
+  - Reference books you can't bet (Novig) are labelled **"reference, not bettable"** and never
+    appear as a bet row or the best price.
+  - References that are also target books (FanDuel and DraftKings for props) are labelled
+    **"reference & target"**. They can be the best price.
+  - Each reference row shows "N% of fair", its weight in this bet's fair price. When the bet is
+    at that same book, the row says **"left out of its own fair price"**.
   - The best price among bettable target books is highlighted (green, BEST).
   - The flagged book is marked "← flagged".
   - Kalshi and Polymarket EV is after fees, and the row says "after fee".
@@ -93,16 +100,18 @@ includes the bookmaker list.
 
 1. **Fetch** (`evtool/api.py`). Main markets come from one `/v4/sports/{sport}/odds` call per sport
    with `markets=h2h,spreads,totals`. Instead of regions it passes an explicit `bookmakers=` list of
-   at most 10 books: references, then targets, then consensus fillers. The main-market list is
-   Pinnacle, Novig, DraftKings, FanDuel, theScore, Kalshi, Polymarket, ProphetX, Fliff and
-   BetOnline. The API bills 10 bookmakers as one region,
-   so each sport costs **3 credits**, even though the books span the us, us2, us_ex and eu regions.
-   Props come from `/v4/sports/{sport}/events/{id}/odds`. The 10-book list is: Pinnacle, Novig,
-   DraftKings, FanDuel, theScore, ProphetX, Pick6, PrizePicks, Underdog and Fliff.
-   `props.skip_books` leaves out:
-   - Kalshi: alternate props only
-   - Polymarket: anytime TD only
-   - Dabble: no NFL props listed. It was dropped to make room for Novig.
+   at most 10 books: that call type's references (minus `unavailable_books`), Novig, targets, then
+   consensus fillers. The API bills 10 bookmakers as one region, so each sport costs **3 credits**,
+   even though the books span the us, us2, us_ex and eu regions.
+   - **Main lines:** Pinnacle, Novig, DraftKings, FanDuel, theScore, Kalshi, Polymarket,
+     ProphetX, Fliff and BetOnline (consensus filler).
+   - **Props** (`/v4/sports/{sport}/events/{id}/odds`): FanDuel, DraftKings, Novig, theScore,
+     ProphetX, Pick6, PrizePicks, Underdog, Fliff and Pinnacle. Pinnacle is a consensus filler
+     here, not a props reference.
+   - **Left out:** Caesars and Courtside (paid plans only); Pick6, PrizePicks and Underdog from
+     main-line calls (props only); BetMGM, BetRivers, LowVig and Bovada (consensus fillers, no slot
+     left); and on prop calls Kalshi (alternate props only), Polymarket (anytime TD only) and
+     Dabble (no NFL props listed).
 
    If the cap ever cuts a reference or target, the CLI prints a warning naming it. Every response is cached to `cache/` and every live call's `x-requests-*` headers are
    appended to `cache/usage_log.jsonl`. The key is added only to the outgoing request and never
@@ -115,26 +124,48 @@ includes the bookmaker list.
 
    A target price is only compared against a reference on exactly the same line. Exchanges such as
    ProphetX sometimes list several price levels for one selection; the best one is kept.
-3. **Fair probabilities.** References are listed in `[sharp] references` (default
-   `["pinnacle", "novig"]`).
-   - A reference line counts only if it is complete (both or all sides), was updated within 30 min,
-     has no side at 1.01 or lower, and has an implied-probability sum within 0.97–1.20.
-   - Novig additionally needs an implied sum of 1.05 or less (`max_implied_sum_by_ref`). Novig is an
-     exchange: its main markets are tight (median sum 1.015), but many of its prop lines are wide,
-     illiquid bid/ask quotes (median 1.069, 90th percentile 1.26). Those aren't treated as prices.
-   - Every reference is de-vigged the same way, Novig included, which removes any leftover
-     overround.
-   - `mode = "priority"` (default): use the first reference with the exact line, so Pinnacle, then
-     Novig.
-   - `mode = "blend"` (`--ref-mode blend`): average de-vigged Pinnacle and Novig when both have the
-     line, otherwise use whichever one does.
-   - Fallback: the leave-one-out consensus of the other books, which excludes the references, the
-     target and the DFS apps. Main markets need at least 3 books and props at least 2; both are
-     configurable.
-   - The `Reference` column (CLI and HTML, where it's also a filter) shows `pinnacle`, `novig`,
-     `blend` or `consensus(n)`. Hovering it shows the exact prices used.
-   - Each run also compares Pinnacle and Novig on every line both have, and writes the result to
-     `output/ref_compare.json`. A summary is printed and added to the report header.
+3. **Fair probabilities.** References are set per call type in `[sharp.main]` and `[sharp.props]`:
+
+   | | references (priority order, weights) | min refs |
+   |---|---|---|
+   | main lines | Pinnacle 50, Bookmaker 30 (n/a), Circa 20 (n/a) | 1 |
+   | player props | FanDuel 50, DraftKings 30, Circa 20 (n/a) | 2 |
+   | last resort (both) | Novig (weight 10), then consensus | |
+
+   - **Usable lines.** A reference line counts only if it is complete (both or all sides), was
+     updated within 30 min, has no side at 1.01 or lower, and has an implied-probability sum
+     within 0.97–1.20. Novig also needs an implied sum of 1.05 or less, because many of its prop
+     lines are wide bid/ask quotes (median 1.069).
+   - **Each book is de-vigged on its own** (power by default) before anything is combined.
+   - **`mode = "blend"` (default).** The fair probability is a weighted average of the listed
+     references that have the exact line. The weights follow your priority order (50/30/20) and
+     are renormalised over the books present. FanDuel + DraftKings becomes 62.5/37.5; Pinnacle
+     alone becomes 100%.
+     - Why blend rather than pure priority: for props, FanDuel and DraftKings are both soft-ish and
+       heavily vigged, so averaging two independent de-vigged prices is less noisy than trusting
+       one.
+     - For main lines only Pinnacle is available today, so blend and first give the same result.
+   - **`mode = "first"` (`--ref-mode first`).** The highest-priority reference with the line sets
+     the price. `min_refs` still has to be met as confirmation.
+   - **Minimum references.** Main lines need ≥1 reference and props ≥2 (`min_refs`), because
+     FD/DK props carry heavier vig. If the listed books fall short, the `fallback_references`
+     (Novig) are added at `fallback_weight` until the minimum is met.
+     - Why Novig goes last: it is a low-vig exchange, but you didn't list it. Its prop quotes are
+       often too wide to use, so it is a sensible tie-breaker rather than a primary.
+   - **No self-comparison.** The book being priced is never part of its own fair price. A FanDuel
+     prop is judged against DraftKings (+Circa, then Novig) only, and a DraftKings prop against
+     FanDuel (+Circa, then Novig). Any reference that is also a target is handled the same way.
+   - **Consensus fallback.** If the minimum still isn't met: a leave-one-out consensus of the
+     other books (excluding the target and the DFS apps). Main lines need at least 3 books and
+     props at least 2.
+   - **Unavailable references.** `[sharp] unavailable_books = ["bookmaker", "circasports"]`: listed
+     by you but not on The Odds API. They are never requested and slot in at their weight if the
+     API adds them (confirm the key name then).
+   - **Reference column.** The CLI and HTML show `pinnacle`, `fanduel`, `blend(fanduel+draftkings)`,
+     `consensus(n)` and so on. Hovering shows the exact prices and weights used.
+   - **Reference comparisons.** Each run compares the first two usable references per type
+     (Pinnacle vs Novig for main lines, FanDuel vs DraftKings for props) and writes the result to
+     `output/ref_compare.json`.
    - **Reference-only books:** `[sharp] never_target = ["novig"]`. Novig is kept out of the target
      list, and the scanner drops any row for it even if someone adds it as a target.
    - De-vig methods:
@@ -269,11 +300,12 @@ past the hour, and the gate accepts late starts.
 
 - `[scan]`: threshold, devig method, Kelly multiplier and cap, markets, sports, live-game skip,
   sharp staleness limit
-- `[sharp]`: sharp book (`pinnacle`), consensus minimum, overround sanity band
+- `[sharp]`: blend/first mode, Novig fallback and weight, unavailable books, never-target books,
+  overround caps, consensus minimum; `[sharp.main]` / `[sharp.props]`: references, weights, min_refs
 - `[api]`: cache TTL, per-run credit cap, 10-books-per-call limit, whether to skip paid-only books
 - `[[target_books]]`: each target with its Odds API key, region and coverage flags (`paid_only`,
   `props_only`, `dfs_entry_types`)
-- `[consensus]`: filler books for the main-market consensus (default novig, betonlineag, betmgm, …)
+- `[consensus]`: filler books for the main-market consensus (betonlineag, betmgm, …)
 - `[props]`: on/off, `max_events`, consensus minimum, filler books, DFS edge threshold, and per-sport
   market keys:
   - NFL/NCAAF: `player_pass_yds, player_rush_yds, player_reception_yds, player_receptions, player_pass_tds, player_anytime_td`
@@ -334,9 +366,13 @@ tests/              unit tests (python3 -m unittest discover -s tests)
 - Caesars (`williamhill_us`) and Courtside (`courtside`) are only on paid Odds API plans.
 - Sportzino, Betr Picks, Sleeper, ParlayPlay, Chalkboard, Boom and Vivid Picks aren't covered at all.
 - Dabble is covered but had no NFL props listed at check time. It's currently skipped on prop calls
-  to make room for Novig.
+  to keep the call at 10 books.
+- Circa and Bookmaker.eu are not carried by The Odds API (checked Oct 7 2026), so main lines rely on
+  Pinnacle (then Novig) and props on FanDuel + DraftKings (then Novig).
+- Because the book being priced is left out of its own fair price, FanDuel and DraftKings prop
+  prices need the other one plus Novig (or a consensus) to be evaluated, so few FD/DK prop rows appear.
 - Novig's prop markets are often wide (illiquid). Those lines are skipped as a reference by the
-  1.05 implied-sum cap, so most prop rows still use Pinnacle or the consensus.
+  1.05 implied-sum cap.
 - The 10-book cap per call is full for props. Adding another app means dropping one or paying for a
   second "region".
 - One-sided markets (e.g. a book's anytime-TD "Yes" with no "No") can only be priced when the

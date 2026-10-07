@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 from evtool.api import OddsAPI, OddsAPIError
 from evtool.report import write_report
-from evtool.scanner import compare_references, reference_settings, scan_events
+from evtool.scanner import compare_references, ref_config, reference_settings, scan_events
 
 ROOT = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
@@ -40,9 +40,7 @@ def bookmaker_list(cfg: dict, props: bool) -> tuple[list[str], list[str]]:
     cap = cfg["api"].get("max_bookmakers_per_call", 10)
     skip_paid = cfg["api"].get("skip_paid_only_books", True)
     skip = set(cfg.get("props", {}).get("skip_books", [])) if props else set()
-    sh = cfg["sharp"]
-    refs = list(sh.get("references") or [sh.get("book", "pinnacle")])
-    never = set(sh.get("never_target", []))
+    refs, _, never = reference_settings(cfg, props)   # per call type; unavailable books left out
     wanted = list(refs)
     for b in cfg["target_books"]:
         k = b.get("key")
@@ -64,8 +62,14 @@ def bookmaker_list(cfg: dict, props: bool) -> tuple[list[str], list[str]]:
     return books, dropped
 
 
-def reference_chain(refs: list[str], mode: str) -> str:
-    return (" + ".join(refs) + " blend" if mode == "blend" else " → ".join(refs)) + " → consensus"
+def reference_chain(cfg: dict, props: bool) -> str:
+    """Human summary, e.g. 'blend pinnacle 50 / bookmaker 30 (n/a) / circasports 20 (n/a), min 1 → novig → consensus'."""
+    rc = ref_config(cfg, props)
+    parts = [f"{r} {w * 100:.0f}" + (" (n/a)" if r in rc["unavailable"] else "")
+             for r, w in zip(rc["refs"], rc["weights"])]
+    head = ("blend " if rc["mode"] == "blend" else "first of ") + " / ".join(parts) + f", min {rc['min_refs']}"
+    tail = "".join(f" → {r}" for r in rc["fallback"]) + (" → consensus" if rc["fallback_mode"] == "consensus" else "")
+    return head + tail
 
 
 def report_footer(cfg: dict) -> str:
@@ -82,7 +86,9 @@ def report_footer(cfg: dict) -> str:
     return ("EV% = fair_prob × decimal_odds − 1 using de-vigged Pinnacle (or leave-one-out consensus) prices on the exact same line. "
             "¼ Kelly is a fraction of bankroll. DFS pick'em rows compare the fair probability with the per-leg break-even (BE) "
             "of the app's best standard entry and show per-leg edge (fair/BE − 1); Kelly is n/a. "
-            "Reference = which fair-odds source was used: pinnacle, novig (reference only, never a target), blend (avg of both), or consensus(n). "
+            "Reference = which fair-odds source was used: one book, blend(a+b) = priority-weighted average of each book's de-vigged line "
+            "(main: Pinnacle, Bookmaker, Circa; props: FanDuel, DraftKings, Circa; Novig = last-resort reference, never a bet), or consensus(n). "
+            "The book being priced is always left out of its own fair price. "
             "Kalshi and Polymarket prices include taker fees. Fliff and Courtside are sweepstakes/social books (EV is in sweeps coins). "
             "Tap a row to compare every book's price. Odds move fast - always re-check the price in the app before betting."
             + ("<br>Break-evens used (verify payouts in each app; hover [source]): " + " · ".join(be_parts) if be_parts else ""))
@@ -118,8 +124,8 @@ def _age_now(api, offline: bool, now: datetime) -> datetime:
     return now
 
 
-ROLE_LABEL = {"reference": "reference, not bettable", "target": "target", "dfs": "pick'em",
-              "other": "not a target", "not bettable": "not bettable"}
+ROLE_LABEL = {"reference": "reference, not bettable", "reference+target": "reference & target",
+              "target": "target", "dfs": "pick'em", "other": "not a target", "not bettable": "not bettable"}
 
 
 def fmt_books(r: dict, indent: str = "      ") -> str:
@@ -131,7 +137,9 @@ def fmt_books(r: dict, indent: str = "      ") -> str:
         star = "★ " if q.get("best") else ("» " if q["book_key"] == r["book_key"] else "  ")
         lines.append(f"{indent}{star}{q['book'][:18]:<19}{q['american']:>9}{(q.get('opposite') or '—')[:13]:>14}"
                      f"{q['implied'] * 100:>7.1f}%{ev:>8}  {ROLE_LABEL.get(q['role'], q['role'])}"
-                     + (f" ({q['entry']})" if q.get("entry") else "") + (" [after fee]" if q.get("fee_adjusted") else ""))
+                     + (f" ({q['entry']})" if q.get("entry") else "") + (" [after fee]" if q.get("fee_adjusted") else "")
+                     + (f" · {q['fair_weight']:.0%} of fair" if q.get("fair_weight") else "")
+                     + (" · excluded (book being priced)" if q.get("self_excluded") else ""))
     if r.get("other_lines"):
         lines.append(f"{indent}  other lines: " + "; ".join(
             f"{o['book']} {o['line']} {o['american']}" + (f"/{o['opposite']}" if o.get('opposite') else "")
@@ -166,8 +174,9 @@ def main(argv=None) -> int:
     ap.add_argument("--sports", help="comma list, e.g. nfl,nba (default: config scan.sports)")
     ap.add_argument("--min-ev", type=float, help="minimum EV%% (default from config)")
     ap.add_argument("--devig", choices=["power", "multiplicative"], help="devig method")
-    ap.add_argument("--ref-mode", choices=["priority", "blend"],
-                    help="fair-odds reference: first of pinnacle/novig, or blend of both")
+    ap.add_argument("--ref-mode", choices=["blend", "first", "priority"],
+                    help="blend = priority-weighted average of the references with the line (default); "
+                         "first = highest-priority reference sets the price (priority = alias)")
     ap.add_argument("--books", help="only show these target book keys, e.g. draftkings,fanduel")
     ap.add_argument("--no-main", action="store_true", help="skip main markets (props only)")
     ap.add_argument("--props", action="store_true", help="also scan player props (per-event, costs more)")
@@ -193,7 +202,8 @@ def main(argv=None) -> int:
     if a.devig:
         sc["devig_method"] = a.devig
     if a.ref_mode:
-        cfg["sharp"]["mode"] = a.ref_mode
+        for sect in (cfg["sharp"], cfg["sharp"].setdefault("main", {}), cfg["sharp"].setdefault("props", {})):
+            sect["mode"] = a.ref_mode
     sports = [s.strip() for s in (a.sports or ",".join(sc["sports"])).split(",") if s.strip()]
     pcfg = cfg.setdefault("props", {})
     do_props = a.props or pcfg.get("enabled", False)
@@ -217,8 +227,10 @@ def main(argv=None) -> int:
         if dropped:
             print(f"[warn] {label}: 10-bookmaker cap dropped {','.join(dropped)} "
                   f"(add them to skip_books or raise max_bookmakers_per_call)", file=sys.stderr)
-    refs, ref_mode, never_target = reference_settings(cfg)
+    refs, ref_mode, never_target = reference_settings(cfg, False)
+    prop_refs, _, _ = reference_settings(cfg, True)
     ref_rows: list[dict] = []
+    prop_ref_rows: list[dict] = []
 
     # ---------------------------------------------------------------- main markets
     if not a.no_main:
@@ -265,9 +277,9 @@ def main(argv=None) -> int:
                 events_scanned["props"] += 1
                 all_bets += scan_events([d], s.upper(), cfg, now=now, markets=mk, props=True,
                                         age_now=_age_now(api, a.offline, now))
-                if len(refs) >= 2:
-                    ref_rows += [{"sport": s.upper(), **r} for r in
-                                 compare_references([d], cfg, refs[0], refs[1], mk, now=now)]
+                if len(prop_refs) >= 2:
+                    prop_ref_rows += [{"sport": s.upper(), **r} for r in
+                                      compare_references([d], cfg, prop_refs[0], prop_refs[1], mk, now=now)]
 
     if a.dry_run:
         print("Main-market bookmakers:", ",".join(main_books))
@@ -305,17 +317,21 @@ def main(argv=None) -> int:
                    + (f" | quota used {used}, remaining {remaining}" if remaining is not None else ""))
     data_ts = (datetime.fromtimestamp(u.oldest_data, ET).strftime("%Y-%m-%d %I:%M %p ET")
                if u.oldest_data else stamp)
-    ref_chain = reference_chain(refs, ref_mode)
+    ref_chain = "main: " + reference_chain(cfg, False) + " · props: " + reference_chain(cfg, True)
     meta = (f"Generated {stamp} · odds as of {data_ts} · fair-odds reference: {ref_chain} · devig: {sc['devig_method']} · "
             f"min EV {sc['min_ev_pct']}% · sports: {', '.join(s.upper() for s in sports)}"
             + (f" · props: {', '.join(s.upper() for s in props_sports)} (next {max_events} events)" if do_props else "")
             + f" · {len(rows)} bets")
     footer = report_footer(cfg)
     ref_summary = summarize_ref_compare(ref_rows, refs)
-    if ref_summary:
-        meta += " · " + ref_summary["text"]
+    prop_ref_summary = summarize_ref_compare(prop_ref_rows, prop_refs)
+    for rs, lab in ((ref_summary, "main"), (prop_ref_summary, "props")):
+        if rs:
+            rs["text"] = f"{lab}: " + rs["text"]
+            meta += " · " + rs["text"]
     with open(out / "ref_compare.json", "w") as fh:
-        json.dump({"summary": ref_summary, "lines": ref_rows}, fh, indent=1)
+        json.dump({"main": {"summary": ref_summary, "lines": ref_rows},
+                   "props": {"summary": prop_ref_summary, "lines": prop_ref_rows}}, fh, indent=1)
     write_report(a.html, rows, meta, footer, sc["min_ev_pct"])
     with open(out / "run_summary.json", "w") as fh:
         json.dump({"generated": stamp, "odds_as_of": data_ts, "sports": sports,
@@ -340,8 +356,9 @@ def main(argv=None) -> int:
     else:
         print(fmt_table(shown))
     print(credit_line)
-    if ref_summary:
-        print(ref_summary["text"])
+    for rs in (ref_summary, prop_ref_summary):
+        if rs:
+            print(rs["text"])
     print("reference used per row: " + ", ".join(f"{k} {v}" for k, v in
           sorted(__import__("collections").Counter(r["fair_source"].split("(")[0] for r in rows).items())))
     print(f"HTML report: {a.html}\nCSV/JSON:    {out}/ev_bets.csv, ev_bets.json")

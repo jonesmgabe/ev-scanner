@@ -167,39 +167,66 @@ def reference_line(idx: dict, book: str, market_key: str, lk, *, method: str,
     return probs, detail
 
 
-def fair_probs(idx: dict, market_key: str, lk, *, refs: list[str], mode: str, method: str,
-               exclude: set[str], consensus_min: int, max_age_min: float, now: datetime):
-    """Return (probs{name: p}, source, detail) or None.
+def _weighted(found: list) -> tuple[dict, dict]:
+    """Weighted average of de-vigged probabilities; returns (probs, {book: weight})."""
+    tot_w = sum(w for _, w, _ in found)
+    names = set(found[0][2][0])
+    probs = {n: sum(w * res[0][n] for _, w, res in found) / tot_w for n in names}
+    t = sum(probs.values())
+    return {n: v / t for n, v in probs.items()}, {r: w / tot_w for r, w, _ in found}
 
-    mode="priority": first reference book (e.g. pinnacle, then novig) with a
-                     usable line on this exact market/line.
-    mode="blend":    average of all references that have the line (label
-                     "blend" when 2+ do, otherwise that single reference).
-    Fallback either way: leave-one-out consensus of the remaining books.
+
+def fair_probs(idx: dict, market_key: str, lk, *, rc: dict, method: str, exclude: set[str],
+               consensus_min: int, max_age_min: float, now: datetime):
+    """Fair probabilities for one exact market/line.
+
+    Returns (probs{name: p}, source, detail, weights{book: share}) or None.
+
+    rc (from ref_config): listed references in priority order with weights
+    (e.g. 50/30/20), Novig-style fallback references, mode and min_refs.
+    * Each reference book is de-vigged on its own first.
+    * Books in `exclude` (the target being priced, DFS apps) are never used:
+      a FanDuel price is judged against the OTHER references only.
+    * If fewer than min_refs listed references have a usable line, fallback
+      references are added (in order) until min_refs is met.
+    * mode "blend": weighted average of the found references, weights
+      renormalised over the books that actually have the line.
+      mode "first": the highest-priority found reference sets the price
+      (min_refs is still required as confirmation).
+    * Still short -> leave-one-out consensus of non-target books (if enabled).
     """
+    kw = dict(method=method, max_age_min=max_age_min, now=now)
     found = []
-    for r in refs:
-        res = reference_line(idx, r, market_key, lk, method=method, max_age_min=max_age_min, now=now)
+    for r, w in zip(rc["refs"], rc["weights"]):
+        if r in exclude or r in rc["unavailable"]:
+            continue
+        res = reference_line(idx, r, market_key, lk, **kw)
         if res:
-            found.append((r, *res))
-            if mode != "blend":
-                break
+            found.append((r, w, res))
+    if len(found) < rc["min_refs"]:
+        for r in rc["fallback"]:
+            if r in exclude or len(found) >= rc["min_refs"]:
+                continue
+            res = reference_line(idx, r, market_key, lk, **kw)
+            if res:
+                found.append((r, rc["fallback_weight"], res))
     if found:
-        if len(found) == 1:
-            r, probs, detail = found[0]
-            return probs, r, detail
-        names = set(found[0][1])
-        if all(set(f[1]) == names for f in found):
-            probs = {n: mean(f[1][n] for f in found) for n in names}
-            t = sum(probs.values())
-            return {n: v / t for n, v in probs.items()}, "blend", " | ".join(f[2] for f in found)
-        r, probs, detail = found[0]
-        return probs, r, detail
-    # consensus fallback: average of each other book's de-vigged line
+        names = set(found[0][2][0])
+        found = [f for f in found if set(f[2][0]) == names]
+    if found and len(found) >= rc["min_refs"]:
+        if rc["mode"] == "first" or len(found) == 1:
+            r, _, (probs, detail) = found[0]
+            return probs, r, detail, {r: 1.0}
+        probs, weights = _weighted(found)
+        detail = " | ".join(f"{res[1]} ({weights[r]:.0%})" for r, _, res in found)
+        return probs, "blend(" + "+".join(r for r, _, _ in found) + ")", detail, weights
+    if rc.get("fallback_mode", "consensus") != "consensus":
+        return None
+    # consensus fallback: average of each other usable book's de-vigged line
     per_book: list[dict] = []
     used: list[str] = []
     for bk, bdata in idx.items():
-        if bk in exclude or bk in refs:
+        if bk in exclude:
             continue
         m = bdata["markets"].get(market_key)
         if not m or lk not in m["lines"] or not _complete(market_key, m["lines"][lk]):
@@ -207,10 +234,13 @@ def fair_probs(idx: dict, market_key: str, lk, *, refs: list[str], mode: str, me
         if _age_min(m["last_update"], now) > max_age_min:
             continue
         line = m["lines"][lk]
+        cap = REF_MAX_IMPLIED_SUM.get(bk)
+        if cap is not None and sum(1 / float(o["price"]) for o in line.values()) > cap:
+            continue
         names = sorted(line)
         per_book.append(dict(zip(names, dv.devig([line[n]["price"] for n in names], method))))
-        used.append(bdata["title"])
-    if len(per_book) < consensus_min:
+        used.append((bk, bdata["title"]))
+    if len(per_book) < max(consensus_min, 1):
         return None
     names = set(per_book[0])
     if any(set(p) != names for p in per_book):
@@ -218,17 +248,40 @@ def fair_probs(idx: dict, market_key: str, lk, *, refs: list[str], mode: str, me
     probs = {n: mean(p[n] for p in per_book) for n in names}
     s = sum(probs.values())
     probs = {n: v / s for n, v in probs.items()}
-    return probs, f"consensus({len(per_book)})", "consensus of " + ", ".join(used)
+    w = 1 / len(used)
+    return (probs, f"consensus({len(per_book)})", "consensus of " + ", ".join(t for _, t in used),
+            {k: w for k, _ in used})
 
 
-def reference_settings(cfg: dict) -> tuple[list[str], str, set[str]]:
-    """(reference books in priority order, mode, books that may never be targets)."""
+def ref_config(cfg: dict, props: bool) -> dict:
+    """Reference settings for one call type ([sharp.main] or [sharp.props])."""
     sh = cfg["sharp"]
-    refs = list(sh.get("references") or [sh.get("book", "pinnacle")])
+    sub = sh.get("props" if props else "main") or {}
+    refs = list(sub.get("references") or sh.get("references") or [sh.get("book", "pinnacle")])
+    weights = list(sub.get("weights") or sh.get("weights") or [])
+    if len(weights) < len(refs):              # default: 50/30/20/... style decay
+        base = [0.5, 0.3, 0.2]
+        weights += [base[i] if i < len(base) else 0.1 for i in range(len(weights), len(refs))]
+    mode = sub.get("mode") or sh.get("mode", "blend")
+    mode = {"priority": "first", "first": "first", "blend": "blend"}.get(mode, "blend")
+    return {"refs": refs, "weights": [float(w) for w in weights[:len(refs)]],
+            "fallback": [r for r in sh.get("fallback_references", []) if r not in refs],
+            "fallback_weight": float(sh.get("fallback_weight", 0.1)),
+            "unavailable": set(sh.get("unavailable_books", [])),
+            "mode": mode, "min_refs": int(sub.get("min_refs", 2 if props else 1)),
+            "fallback_mode": sh.get("fallback", "consensus")}
+
+
+def reference_settings(cfg: dict, props: bool = False) -> tuple[list[str], str, set[str]]:
+    """(usable reference books incl. fallbacks, in priority order; mode; never-target books).
+    Also loads the per-reference overround caps."""
+    sh = cfg["sharp"]
+    rc = ref_config(cfg, props)
     never = set(sh.get("never_target", []))
     REF_MAX_IMPLIED_SUM.clear()
     REF_MAX_IMPLIED_SUM.update(sh.get("max_implied_sum_by_ref", {}))
-    return refs, sh.get("mode", "priority"), never
+    usable = [r for r in rc["refs"] if r not in rc["unavailable"]] + rc["fallback"]
+    return usable, rc["mode"], never
 
 
 def compare_references(events: list[dict], cfg: dict, a: str, b: str, markets: list[str],
@@ -286,13 +339,17 @@ def _line_label(market_key: str, outcome: dict) -> str:
 
 def build_quotes(idx: dict, market_key: str, lk, name: str, fair_p: float, *, refs: list[str],
                  never_target: set[str], targets: set[str], dfs_be: dict, fees: dict,
-                 max_other: int = 3) -> tuple[list[dict], list[dict]]:
+                 max_other: int = 3, weights: dict | None = None,
+                 priced_book: str | None = None) -> tuple[list[dict], list[dict]]:
     """Every book's quote for this exact market/selection/line, plus books that
     only list the market at a different line ('other lines').
 
-    role: reference (not bettable) | target | dfs | other (fetched for consensus,
-    not one of your target books). `best` marks the best price among bettable
-    target sportsbooks/exchanges (after exchange fees)."""
+    role: reference (not bettable) | reference+target (a reference you can also
+    bet, e.g. FanDuel for props) | target | dfs | other (fetched for consensus).
+    fair_weight: this book's share of THIS bet's fair price (None = not used);
+    self_excluded: the book being priced, left out of its own fair price.
+    `best` marks the best price among bettable books (after exchange fees)."""
+    weights = weights or {}
     quotes, others = [], []
     for bk, bdata in idx.items():
         m = bdata["markets"].get(market_key)
@@ -302,7 +359,9 @@ def build_quotes(idx: dict, market_key: str, lk, name: str, fair_p: float, *, re
         if line and name in line:
             o = line[name]
             price = float(o["price"])
-            if bk in refs:
+            if bk in refs and bk in targets and bk not in never_target:
+                role = "reference+target"
+            elif bk in refs:
                 role = "reference"
             elif bk in never_target:
                 role = "not bettable"
@@ -319,7 +378,9 @@ def build_quotes(idx: dict, market_key: str, lk, name: str, fair_p: float, *, re
                      (f"{n2.split()[-1]} " if len(opp) > 1 else "") +
                      (dv.fmt_american(dv.decimal_to_american(float(o2["price"]))) if float(o2["price"]) > 1.0 else "—")
                      for n2, o2 in opp),
-                 "last_update": m.get("last_update") or "", "best": False}
+                 "last_update": m.get("last_update") or "", "best": False,
+                 "fair_weight": round(weights[bk], 3) if bk in weights else None,
+                 "self_excluded": bk == priced_book and bk in refs}
             if role == "dfs":
                 entry, be = dfs_be[bk]
                 q.update({"american": f"BE {dv.fmt_american(dv.prob_to_american(be))}" if entry else "—",
@@ -348,20 +409,21 @@ def build_quotes(idx: dict, market_key: str, lk, name: str, fair_p: float, *, re
                     dist = abs(float(olk or 0) - float(lk or 0))   # same key space (home handicap / total)
                 opp = [o2 for n2, o2 in oline.items() if n2 != name]
                 alts.append((dist, {"book_key": bk, "book": bdata["title"],
-                                    "role": "reference" if bk in refs else ("dfs" if bk in dfs_be else
-                                            ("target" if bk in targets else "other")),
+                                    "role": ("reference+target" if bk in refs and bk in targets else
+                                             "reference" if bk in refs else ("dfs" if bk in dfs_be else
+                                             ("target" if bk in targets else "other"))),
                                     "line": _line_label(market_key, o),
                                     "american": dv.fmt_american(dv.decimal_to_american(float(o["price"]))),
                                     "opposite": ", ".join(dv.fmt_american(dv.decimal_to_american(float(o2["price"])))
                                                           for o2 in opp if float(o2["price"]) > 1.0)}))
             alts.sort(key=lambda t: t[0])
             others += [a for _, a in alts[:max_other]]
-    bettable = [q for q in quotes if q["role"] == "target" and q.get("ev_pct") is not None]
+    bettable = [q for q in quotes if q["role"] in ("target", "reference+target") and q.get("ev_pct") is not None]
     if bettable:
         top = max(q["eff_decimal"] for q in bettable)
         for q in bettable:
             q["best"] = abs(q["eff_decimal"] - top) < 1e-9
-    order = {"reference": 0, "target": 1, "dfs": 2, "other": 3, "not bettable": 4}
+    order = {"reference": 0, "reference+target": 0, "target": 1, "dfs": 2, "other": 3, "not bettable": 4}
     quotes.sort(key=lambda q: (order.get(q["role"], 9), -(q.get("eff_decimal") or 0)))
     others.sort(key=lambda q: (order.get(q["role"], 9), q["book"]))
     return quotes, others
@@ -379,7 +441,8 @@ def scan_events(events: list[dict], sport_label: str, cfg: dict, now: datetime |
     age_now = age_now or now   # offline re-scans judge staleness at fetch time, not wall-clock
     sc, sh = cfg["scan"], cfg["sharp"]
     pc = cfg.get("props", {})
-    refs, ref_mode, never_target = reference_settings(cfg)
+    refs, ref_mode, never_target = reference_settings(cfg, props)
+    rc = ref_config(cfg, props)
     method = sc.get("devig_method", "power")
     markets = set(markets or sc["markets"])
     consensus_min = pc.get("consensus_min_books", 2) if props else sh.get("consensus_min_books", 3)
@@ -411,13 +474,14 @@ def scan_events(events: list[dict], sport_label: str, cfg: dict, now: datetime |
                 if mkey not in markets:
                     continue
                 for lk, line in m["lines"].items():
-                    fp = fair_probs(idx, mkey, lk, refs=refs, mode=ref_mode, method=method,
-                                    exclude={tkey} | set(dfs_books),
+                    # the book being priced is never part of its own fair price
+                    fp = fair_probs(idx, mkey, lk, rc=rc, method=method,
+                                    exclude={tkey} | set(dfs_books) | (never_target - set(refs)),
                                     consensus_min=consensus_min,
                                     max_age_min=sc.get("max_fair_odds_age_min", 30), now=age_now)
                     if not fp:
                         continue
-                    probs, source, detail = fp
+                    probs, source, detail, fweights = fp
                     for name, o in line.items():
                         if name not in probs:
                             continue
@@ -446,7 +510,8 @@ def scan_events(events: list[dict], sport_label: str, cfg: dict, now: datetime |
                             continue
                         quotes, other_lines = build_quotes(
                             idx, mkey, lk, name, p, refs=refs, never_target=never_target,
-                            targets=set(targets) - set(dfs_books), dfs_be=dfs_be, fees=fees)
+                            targets=set(targets) - set(dfs_books), dfs_be=dfs_be, fees=fees,
+                            weights=fweights, priced_book=tkey)
                         out.append(EVBet(
                             sport=sport_label, event=ev_name, event_id=ev["id"],
                             commence_utc=ev["commence_time"],

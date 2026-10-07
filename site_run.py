@@ -232,12 +232,24 @@ def next_slot(cfg, now: datetime) -> datetime:
     return now
 
 
+def logic_fingerprint(cfg) -> str:
+    """Changes whenever the pricing logic's settings change (references, devig, caps)."""
+    import hashlib
+    blob = json.dumps({"sharp": cfg["sharp"], "devig": cfg["scan"].get("devig_method"),
+                       "min_ev": cfg["scan"].get("min_ev_pct")}, sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]
+
+
 def build(a, cfg) -> int:
     now = datetime.now(UTC)
     site = cfg["site"]
     cfg["scan"]["min_ev_pct"] = site.get("min_ev_pct", cfg["scan"]["min_ev_pct"])
     prev = load_prev(a.prev_url, a.prev_file)
+    logic = logic_fingerprint(cfg)
+    logic_changed = bool(prev) and prev.get("logic") != logic
     state = prev.get("state", {"last_scanned": {}})
+    if logic_changed:   # bets priced under old settings must not be carried; rescan stalest-first from scratch
+        state = {"last_scanned": {}}
     runs_log = prev.get("runs", [])
     api = OddsAPI(ROOT / cfg["api"].get("cache_dir", "cache"), cache_ttl_minutes=10, offline=a.offline,
                   max_credits_per_run=0)   # raised below once the budget guard has decided
@@ -316,13 +328,15 @@ def build(a, cfg) -> int:
         banner.append(f"No new odds this run: {bud.get('reason', 'skipped')}. Showing the last good scan.")
     elif not refreshed:
         banner.append("This run could not pull any odds (API error). Showing the last good scan.")
+    if logic_changed:
+        notes.append("Fair-odds settings changed since the last run: earlier bets were dropped, not carried over.")
     if errors:
         notes.append(f"{len(errors)} API warning(s): " + "; ".join(e[:140] for e in errors[:3]))
 
     # 4. merge with the previous run
     carry_h = site.get("carry_over_hours", 24)
     carried = []
-    for r in prev.get("bets", []):
+    for r in ([] if logic_changed else prev.get("bets", [])):
         try:
             if r.get("scope") in refreshed or parse_iso(r["commence_utc"]) <= now:
                 continue
@@ -374,8 +388,7 @@ def build(a, cfg) -> int:
     details = [q] + notes
     status_html += ('<details class="note"><summary>Run details</summary>'
                     + "".join(f"<div>{html.escape(d)}</div>" for d in details) + "</details>")
-    refs, mode, _ = reference_settings(cfg)
-    meta = (f"Fair-odds reference: {ev.reference_chain(refs, mode)} · devig: {cfg['scan']['devig_method']} · "
+    meta = (f"Fair-odds reference · main: {ev.reference_chain(cfg, False)} · props: {ev.reference_chain(cfg, True)} · devig: {cfg['scan']['devig_method']} · "
             f"min EV {cfg['scan']['min_ev_pct']}% · {len(rows)} bets ({len(new_rows)} new, {len(carried)} carried over) · "
             f"schedule: {', '.join(site['slots_et'])} ET")
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
@@ -387,7 +400,7 @@ def build(a, cfg) -> int:
     (out / "index.html").write_text(doc)
     (out / "robots.txt").write_text("User-agent: *\nDisallow: /\n")
     (out / "site_data.json").write_text(json.dumps({
-        "generated_utc": now.isoformat(), "last_good_utc": last_good, "bets": rows,
+        "generated_utc": now.isoformat(), "last_good_utc": last_good, "bets": rows, "logic": logic,
         "state": state, "runs": runs_log}, separators=(",", ":")))
     summary = {"generated_et": fmt_et(now), "credits_this_run": spent, "cap": bud.get("cap"),
                "quota_used": used, "quota_remaining": remaining, "skipped": bool(bud["skip"]),

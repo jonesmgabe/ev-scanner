@@ -124,7 +124,7 @@ footer{color:var(--muted);font-size:12px;padding:0 28px 28px}
 <script>
 const DATA = __DATA__;
 const OPEN = new Set(__OPEN__);
-const ROLE = {reference:'reference, not bettable', target:'target book', dfs:"pick'em", other:'not a target', 'not bettable':'not bettable'};
+const ROLE = {reference:'reference, not bettable', 'reference+target':'reference & target', target:'target book', dfs:"pick'em", other:'not a target', 'not bettable':'not bettable'};
 DATA.forEach((r,i)=>{r._id=i;r.ref=r.fair_source.split('(')[0];r.type=r.is_dfs?'DFS':(r.is_prop?'Prop':'Main');});
 const $ = s => document.querySelector(s);
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -144,9 +144,11 @@ function evCell(v){ if(v===null||v===undefined) return '<span class="src">—</s
 function panel(r){
   const qs = r.quotes||[];
   const rows = qs.map(q=>{
-    const cls=[q.best?'best':'', q.book_key===r.book_key?'flag':'', q.role==='reference'?'refrow':''].join(' ');
+    const cls=[q.best?'best':'', q.book_key===r.book_key?'flag':'', q.role.startsWith('reference')?'refrow':''].join(' ');
     const role = ROLE[q.role]||q.role;
-    const extra = q.role==='dfs' ? (q.entry? ' · '+esc(q.entry):'') : (q.fee_adjusted? ' · after fee':'');
+    const extra = (q.role==='dfs' ? (q.entry? ' · '+esc(q.entry):'') : (q.fee_adjusted? ' · after fee':''))
+      + (q.fair_weight? ` · ${Math.round(q.fair_weight*100)}% of fair` : '')
+      + (q.self_excluded? ' · left out of its own fair price' : '');
     return `<tr class="${cls}"><td><b>${esc(q.book)}</b>${q.best?'<span class="badge">BEST</span>':''}<span class="role">${esc(role)}${extra}</span></td>
 <td class="num">${esc(q.american)}${q.opposite?'<span class="role show-q">opp '+esc(q.opposite)+'</span>':''}</td><td class="num hide-q">${esc(q.opposite||'—')}</td>
 <td class="num">${q.implied!=null?(q.implied*100).toFixed(1)+'%':'—'}</td>

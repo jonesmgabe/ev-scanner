@@ -13,26 +13,45 @@ skip_live = true              # ignore events that have already started
 max_fair_odds_age_min = 30    # ignore sharp prices whose market last_update is older than this
 
 [sharp]
-# Fair-odds references, in priority order. Each is de-vigged (power/multiplicative)
-# on the exact same line - including Novig, which is an exchange with little or no
-# vig, so devigging just removes any residual over/underround.
-references = ["pinnacle", "novig"]   # pinnacle = eu region, novig = us_ex region
-mode = "priority"             # "priority": first reference with the line (pinnacle, then novig)
-                              # "blend":    average de-vigged pinnacle + novig when both exist
-                              # CLI: --ref-mode priority|blend
-fallback = "consensus"        # if no reference has the exact market/line
+# Fair-odds references are set PER CALL TYPE ([sharp.main] / [sharp.props]), in priority order.
+# Every reference is de-vigged on its own (power/multiplicative) before anything is combined.
+#   mode = "blend": weighted average of the listed references that have the EXACT line,
+#                   weights by priority (50/30/20) renormalised over the books present.
+#   mode = "first": the highest-priority reference with the line sets the price.
+#   (CLI: --ref-mode blend|first)
+# The book being priced is never part of its own fair price: a FanDuel prop is judged
+# against DraftKings (+Circa) only, a DraftKings prop against FanDuel (+Circa), etc.
+# If fewer than min_refs listed references have the line, fallback_references are added
+# (in order, with fallback_weight) until min_refs is met; still short -> consensus.
+mode = "blend"
+fallback_references = ["novig"]   # last resort, after the listed books, before consensus
+fallback_weight = 0.10
+fallback = "consensus"            # "consensus" or "none"
+# Listed by you but NOT carried by The Odds API (probed 2026-10-07: absent from all 6
+# regions and from a direct bookmakers= probe). Kept in the lists so they slot in at their
+# priority/weight if the API adds them (check the key name then); never requested now.
+unavailable_books = ["bookmaker", "circasports"]
 # Reference-only books: NEVER evaluated as a target or shown as a bet row
 # (Novig is used purely as a fair-odds reference). Enforced in the scanner too.
 never_target = ["novig"]
 # Per-reference overround cap: an exchange line whose implied probabilities sum
 # above this is a wide bid/ask (illiquid), not a price -> skip that reference for
-# that line and fall through to the next one. On 2026-10-07 Novig main markets had
-# a median implied sum of 1.015 (90th pct 1.047); its props median 1.069 (p90 1.26).
+# that line. On 2026-10-07 Novig main markets had a median implied sum of 1.015
+# (90th pct 1.047); its props median 1.069 (p90 1.26).
 max_implied_sum_by_ref = { novig = 1.05 }
-book = "pinnacle"             # legacy single-sharp setting (used only if `references` is absent)
-consensus_min_books = 3       # minimum books (excluding the target) for a consensus price
+consensus_min_books = 3       # minimum books (excluding the target) for a main-market consensus price
 min_implied_sum = 0.97        # reference lines outside this overround band are ignored
 max_implied_sum = 1.20        # (filters junk such as 1.01/1.01 quotes on illiquid exchanges)
+
+[sharp.main]                  # moneyline / spread / total
+references = ["pinnacle", "bookmaker", "circasports"]   # Pinnacle (eu), Bookmaker.eu (n/a), Circa (n/a)
+weights = [0.5, 0.3, 0.2]
+min_refs = 1
+
+[sharp.props]                 # player props
+references = ["fanduel", "draftkings", "circasports"]   # FanDuel, DraftKings (us), Circa (n/a)
+weights = [0.5, 0.3, 0.2]
+min_refs = 2                  # FD/DK props carry heavier vig -> need two de-vigged books to agree
 
 [api]
 odds_format = "decimal"
@@ -226,7 +245,7 @@ rate = 0.0695     # Polymarket US taker theta (effective Sep 17 2026)
 enabled = false               # CLI: --props
 max_events = 3                # per sport, soonest first (CLI: --max-events)
 consensus_min_books = 2       # min other books at the exact player+line if Pinnacle lacks it
-consensus_books = ["betmgm", "betrivers"]   # fill leftover bookmaker slots (props)
+consensus_books = ["pinnacle", "betmgm", "betrivers"]   # fill leftover bookmaker slots (props); pinnacle = consensus member only
 skip_books = ["kalshi", "polymarket", "dabble_us_dfs"]
 # kalshi: alternate props only; polymarket: anytime-TD only (junk 1.01 quotes);
 # dabble_us_dfs: listed but had no NFL props on 2026-10-07 - dropped to make room

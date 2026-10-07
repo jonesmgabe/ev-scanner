@@ -173,9 +173,10 @@ class TestReferences(unittest.TestCase):
         self.assertEqual(pri[0].fair_source, "pinnacle")
         self.assertAlmostEqual(pri[0].fair_prob, 0.5, places=4)
         bl = scan_events([self._ev(books)], "NFL", self._cfg("blend"))
-        self.assertEqual(bl[0].fair_source, "blend")
+        self.assertEqual(bl[0].fair_source, "blend(pinnacle+novig)")
         nov_home = (1 / 1.8) / (1 / 1.8 + 1 / 2.25)   # exactly 0.5556; no overround so devig = identity
-        self.assertAlmostEqual(bl[0].fair_prob, round((0.5 + nov_home) / 2, 4), places=4)
+        # priority weights 50/30 renormalised -> 62.5% / 37.5%
+        self.assertAlmostEqual(bl[0].fair_prob, round(0.625 * 0.5 + 0.375 * nov_home, 4), places=4)
 
     def test_book_comparison_quotes(self):
         cfg = self._cfg("priority")
@@ -205,3 +206,112 @@ class TestReferences(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPerTypeReferences(unittest.TestCase):
+    """[sharp.main] / [sharp.props] references, weights, min_refs, self-exclusion."""
+    @staticmethod
+    def _cfg(mode="blend", unavailable=("bookmaker", "circasports")):
+        cfg = {k: (dict(v) if isinstance(v, dict) else v) for k, v in TestScannerExactLine.CFG.items()}
+        cfg["sharp"] = {"mode": mode, "fallback_references": ["novig"], "fallback_weight": 0.1,
+                        "unavailable_books": list(unavailable), "never_target": ["novig"],
+                        "consensus_min_books": 3,
+                        "main": {"references": ["pinnacle", "bookmaker", "circasports"],
+                                 "weights": [0.5, 0.3, 0.2], "min_refs": 1},
+                        "props": {"references": ["fanduel", "draftkings", "circasports"],
+                                  "weights": [0.5, 0.3, 0.2], "min_refs": 2}}
+        cfg["props"] = {"consensus_min_books": 2}
+        cfg["target_books"] = [{"name": "DraftKings", "key": "draftkings", "covered": True},
+                               {"name": "FanDuel", "key": "fanduel", "covered": True},
+                               {"name": "ProphetX", "key": "prophetx", "covered": True},
+                               {"name": "Novig", "key": "novig", "covered": True}]
+        return cfg
+
+    @staticmethod
+    def _prop(key, over, under, point=4.5, player="Joe Smith"):
+        return {"key": key, "title": key.title(), "markets": [{"key": "player_receptions", "outcomes": [
+            {"name": "Over", "description": player, "price": over, "point": point},
+            {"name": "Under", "description": player, "price": under, "point": point}]}]}
+
+    @staticmethod
+    def _ml(key, home, away):
+        return {"key": key, "title": key.title(), "markets": [{"key": "h2h", "outcomes": [
+            {"name": "Home", "price": home}, {"name": "Away", "price": away}]}]}
+
+    def _scan(self, books, cfg, props):
+        ev = {"id": "e1", "commence_time": "2099-01-01T00:00:00Z", "home_team": "Home",
+              "away_team": "Away", "bookmakers": books}
+        return scan_events([ev], "NFL", cfg, markets=["player_receptions"] if props else ["h2h"], props=props)
+
+    def test_props_blend_weights_and_target_excluded_from_own_fair(self):
+        cfg = self._cfg()
+        books = [self._prop("fanduel", 2.0, 2.0), self._prop("draftkings", 1.8, 2.25),
+                 self._prop("novig", 1.95, 2.05), self._prop("prophetx", 2.3, 1.6)]
+        bets = {b.book_key: b for b in self._scan(books, cfg, True)}
+        # ProphetX: FanDuel 50 + DraftKings 30 -> 62.5/37.5 (Novig not needed: min_refs met)
+        px = bets["prophetx"]
+        self.assertEqual(px.fair_source, "blend(fanduel+draftkings)")
+        dk_over = (1 / 1.8) / (1 / 1.8 + 1 / 2.25)
+        self.assertAlmostEqual(px.fair_prob, round(0.625 * 0.5 + 0.375 * dk_over, 4), places=4)
+        q = {x["book_key"]: x for x in px.quotes}
+        self.assertEqual(q["fanduel"]["role"], "reference+target")
+        self.assertEqual(q["novig"]["role"], "reference")
+        self.assertIsNone(q["novig"]["fair_weight"])
+        self.assertAlmostEqual(q["fanduel"]["fair_weight"], 0.625, places=3)
+
+    def test_fanduel_price_never_judged_against_fanduel(self):
+        cfg = self._cfg()
+        # FanDuel offers a big Over price; its own line must not dilute the fair price
+        books = [self._prop("fanduel", 2.40, 1.60), self._prop("draftkings", 2.0, 2.0),
+                 self._prop("novig", 2.0, 2.0)]
+        bets = [b for b in self._scan(books, cfg, True) if b.book_key == "fanduel"]
+        self.assertEqual(len(bets), 1)
+        b = bets[0]
+        # fair from DraftKings (30) + Novig fallback (10) only -> exactly 50%
+        self.assertEqual(b.fair_source, "blend(draftkings+novig)")
+        self.assertAlmostEqual(b.fair_prob, 0.5, places=4)
+        self.assertAlmostEqual(b.ev_pct, 20.0, places=2)
+        q = {x["book_key"]: x for x in b.quotes}
+        self.assertTrue(q["fanduel"]["self_excluded"])
+        self.assertIsNone(q["fanduel"]["fair_weight"])
+        self.assertAlmostEqual(q["draftkings"]["fair_weight"], 0.75, places=3)
+
+    def test_props_need_two_references(self):
+        cfg = self._cfg()
+        cfg["props"]["consensus_min_books"] = 9          # disable the consensus escape hatch
+        books = [self._prop("fanduel", 2.0, 2.0), self._prop("prophetx", 2.3, 1.6)]
+        self.assertEqual(self._scan(books, cfg, True), [])  # FanDuel alone is not enough
+        books.append(self._prop("novig", 2.0, 2.0))         # Novig fills the second slot
+        bets = self._scan(books, cfg, True)
+        self.assertEqual([b.fair_source for b in bets], ["blend(fanduel+novig)"])
+
+    def test_main_weights_renormalise_and_first_mode(self):
+        cfg = self._cfg(unavailable=())                      # pretend Circa is on the API
+        books = [self._ml("pinnacle", 2.0, 2.0), self._ml("circasports", 1.8, 2.25),
+                 self._ml("draftkings", 2.2, 1.7)]
+        b = self._scan(books, cfg, False)[0]
+        circa_home = (1 / 1.8) / (1 / 1.8 + 1 / 2.25)
+        self.assertEqual(b.fair_source, "blend(pinnacle+circasports)")   # 50/20 -> 71.4/28.6
+        self.assertAlmostEqual(b.fair_prob, round((0.5 * 0.5 + 0.2 * circa_home) / 0.7, 4), places=4)
+        b = self._scan(books, self._cfg(mode="first", unavailable=()), False)[0]
+        self.assertEqual((b.fair_source, b.fair_prob), ("pinnacle", 0.5))
+
+    def test_main_falls_back_to_novig_then_never_bets_it(self):
+        cfg = self._cfg()
+        books = [self._ml("novig", 2.0, 2.0), self._ml("draftkings", 2.2, 1.7)]
+        bets = self._scan(books, cfg, False)
+        self.assertEqual([(b.book_key, b.fair_source) for b in bets], [("draftkings", "novig")])
+
+    def test_bookmaker_lists_per_call_type(self):
+        import ev, tomllib
+        from pathlib import Path
+        real = tomllib.loads((Path(__file__).resolve().parents[1] / "config.toml").read_text())
+        main, _ = ev.bookmaker_list(real, props=False)
+        props, _ = ev.bookmaker_list(real, props=True)
+        for lst in (main, props):
+            self.assertLessEqual(len(lst), 10)
+            self.assertNotIn("circasports", lst)
+            self.assertNotIn("bookmaker", lst)
+            self.assertIn("novig", lst)
+        self.assertEqual(main[:2], ["pinnacle", "novig"])
+        self.assertEqual(props[:3], ["fanduel", "draftkings", "novig"])

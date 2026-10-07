@@ -31,7 +31,7 @@ payout tables in `config.toml` `[dfs.*]`. Payouts change, so verify them in each
 | PrizePicks | Yes | `prizepicks` | us_dfs | Yes | **54.21%** (6-pick flex 25x/2x/0.4x) | oddsreference.com platform comparison (verified there Jul 19 2026); 6-flex from oddsassist.com |
 | DraftKings Pick6 | Yes | `pick6` | us_dfs | Yes (TB@DAL only) | **56.10%** (5-pick 18x; Base Payout only, so conservative) | oddsreference.com (Jul 19 2026) |
 | Underdog | Yes | `underdog` | us_dfs | Yes | **53.74%** (5-pick insured 10x/2x/0.5x) | oddsreference.com (Jul 19 2026) |
-| Dabble | Yes | `dabble_us_dfs` | us_dfs | **No NFL listings** at check time. Now in `props.skip_books` to make room for Novig. | **54.07%** (6-pick All-In 40x) | Dabble Help Center pay scale (updated Sep 3 2026) |
+| Dabble | Yes | `dabble_us_dfs` | us_dfs | **No NFL listings** at check time. In `props.skip_books` to keep prop calls at 10 books. | **54.07%** (6-pick All-In 40x) | Dabble Help Center pay scale (updated Sep 3 2026) |
 | Betr Picks | No | – (only `betr_au`, an Australian sportsbook) | – | – | – | No documented public API found |
 | Sleeper Picks | No | – | – | – | – | Sleeper's public read-only API (docs.sleeper.com) covers fantasy leagues, players and stats, not pick'em lines |
 | ParlayPlay | No | – | – | – | – | No documented public API found |
@@ -42,14 +42,25 @@ payout tables in `config.toml` `[dfs.*]`. Payouts change, so verify them in each
 Sites that need a login were not scraped. Paid odds aggregators advertise DFS pick'em feeds, but
 coverage of each uncovered app was not verified.
 
-## Fair-odds references (never targets)
+## Fair-odds references
 
-| Reference | Key | Region | Main markets (events with odds in the Oct 7 data) | Props |
-|---|---|---|---|---|
-| Pinnacle | `pinnacle` | eu | NFL 15/29, NCAAF 56/66, NBA 12/46, NHL 3/14, MLB 4/4, WNBA 2/2 | NFL core props for near-term games |
-| **Novig** (no-vig exchange) | `novig` | us_ex | h2h/spreads/totals: NFL 29/29, NCAAF 57/66, NBA 13/46, NHL 12/14, MLB 4/4, WNBA 2/2 | Yes. `/markets` check (1 credit each, 3 total): NFL pass/rush/rec yds, receptions, pass TDs, anytime TD (+ more); WNBA points/rebounds/assists/threes/PRA; NHL points/SOG/goals/assists/saves. Prop quotes are often wide (median implied sum 1.069), so lines above 1.05 are not used. |
+Configured in `[sharp.main]` / `[sharp.props]`. Checked Oct 7 2026: one `/events/{id}/markets` call across
+`us,us2,us_ex,eu,uk,au` (1 credit, 73 bookmakers for TB@DAL) plus one direct `bookmakers=` probe with 8
+candidate keys (1 credit). Output: `output/coverage_probe_circa_bookmaker.json`.
 
-Novig is reference-only via `never_target = ["novig"]`: it is never a target book or a bet row. Output: `output/coverage_probe_novig.json`.
+| Reference | Used for | Key | Region | On The Odds API? | Props |
+|---|---|---|---|---|---|
+| Pinnacle | main #1 (50) | `pinnacle` | eu | Yes, free key. NFL 15/29, NCAAF 56/66, NBA 12/46, NHL 3/14, MLB 4/4, WNBA 2/2 events | 10 NFL prop markets for TB@DAL. Used only as a props consensus filler now |
+| **Bookmaker.eu** | main #2 (30) | none | none | **No.** Absent from all 6 regions. `bookmaker`, `bookmakereu`, `bookmaker_eu`, `bookmakerag`, `bookmaker_ag` returned nothing | n/a |
+| **Circa Sports** | main #3 / props #3 (20) | none | none | **No.** Absent from all 6 regions. `circasports`, `circa`, `circa_sports` returned nothing | n/a |
+| FanDuel | props #1 (50), also a target | `fanduel` | us | Yes, free key | Yes: 25 prop markets for TB@DAL |
+| DraftKings | props #2 (30), also a target | `draftkings` | us | Yes, free key | Yes: 46 prop markets for TB@DAL |
+| **Novig** (no-vig exchange) | last resort, both (10) | `novig` | us_ex | Yes, free key. h2h/spreads/totals: NFL 29/29, NCAAF 57/66, NBA 13/46, NHL 12/14, MLB 4/4, WNBA 2/2 | Yes (NFL yds/receptions/TDs, WNBA, NHL). Prop quotes are often wide (median implied sum 1.069), so lines above 1.05 are not used |
 
-Sharp reference: `pinnacle` (eu). It posts NFL props (pass/rush/rec yards, receptions, pass TDs,
-anytime TD) for the near-term games.
+Bookmaker and Circa stay in the config lists with `[sharp] unavailable_books = ["bookmaker", "circasports"]`, so
+they are never requested and would slot in at their priority if the API adds them. Check the key name then.
+Some other odds aggregators (e.g. OddsPapi) carry Circa as `circasports`; The Odds API does not.
+
+Novig is reference-only via `never_target = ["novig"]`: it is never a target book or a bet row
+(`output/coverage_probe_novig.json`). FanDuel and DraftKings are both references (props) and targets. A
+FanDuel price is always priced from the other references only, never against itself.
