@@ -90,6 +90,12 @@ class TestPlan(unittest.TestCase):
         self.assertEqual([m["sport"] for m in p["mains"]], ["nhl"])
         self.assertEqual([x["event"]["id"] for x in p["props"]], ["e3"])   # e2 props recent -> next game
 
+    def test_small_cap_prefers_main_markets(self):
+        evs = {"icehockey_nhl": [self._ev(2, 1)]}
+        p = sr.make_plan(CFG, FakeAPI(evs), set(evs), 4, {"last_scanned": {}}, self.now)
+        self.assertEqual([m["sport"] for m in p["mains"]], ["nhl"])
+        self.assertEqual(p["props"], [])
+
     def test_shrinks_markets_when_cap_tiny(self):
         evs = {"americanfootball_nfl": [self._ev(1, 5)]}
         cfg = {**CFG, "site": {**CFG["site"], "props_sports": []}}

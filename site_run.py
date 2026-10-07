@@ -184,7 +184,8 @@ def make_plan(cfg, api: OddsAPI, active: set[str], cap: int, state: dict, now: d
 
     mk_main = list(site["main_markets"])
     cost_main = len(mk_main)                    # x1 region: <=10 bookmakers per call
-    reserve = min(site.get("props_reserve_credits", 0), cap) if prop_cands else 0
+    pres = site.get("props_reserve_credits", 0)
+    reserve = pres if prop_cands and cap >= cost_main + pres else 0   # main markets first on small caps
     left, mains, props = cap, [], []
     for c in cands:
         if len(mains) < site.get("max_main_sports_per_run", 6) and cost_main <= left - reserve:
