@@ -1,0 +1,111 @@
+# Scheduled +EV scan -> GitHub Pages.
+#
+# CADENCE + CAPS: the run times live in config.toml [site].slots_et (ET) and in
+# the cron lines below (UTC). Each ET slot has two cron lines, one for EDT
+# (UTC-4) and one for EST (UTC-5); the "gate" step runs only the one that
+# matches the current DST state, so times stay right all year.
+# After editing slots_et, print matching lines with:  python3 site_run.py crons
+# Credit caps: config.toml [budget]. See README "When you upgrade the API".
+name: Scan and publish
+
+on:
+  schedule:
+    - cron: "20 14 * * *"   # 10:20 ET when UTC-4
+    - cron: "20 15 * * *"   # 10:20 ET when UTC-5
+    - cron: "20 16 * * *"   # 12:20 ET when UTC-4
+    - cron: "20 17 * * *"   # 12:20 ET when UTC-5
+    - cron: "10 22 * * *"   # 18:10 ET when UTC-4
+    - cron: "10 23 * * *"   # 18:10 ET when UTC-5
+  workflow_dispatch:
+    inputs:
+      max_credits:
+        description: "Credit cap for this manual run (0 = config [budget].max_credits_per_run; the reserve is always kept)"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write        # keep-alive call below (stops GitHub pausing schedules after 60 quiet days)
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Gate (DST-aware schedule)
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: python3 site_run.py gate --event "$EVENT" --schedule "$SCHEDULE"
+
+      - name: Unit tests
+        if: steps.gate.outputs.run == 'true'
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Configure Pages
+        if: steps.gate.outputs.run == 'true'
+        id: pages
+        uses: actions/configure-pages@v6
+
+      - name: Scan and build site (budget-guarded)
+        if: steps.gate.outputs.run == 'true'
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          EVENT: ${{ github.event_name }}
+          MAX_CREDITS: ${{ github.event.inputs.max_credits || '0' }}
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+        run: python3 site_run.py build --out site --prev-url "$SITE_URL" --event "$EVENT" --max-credits "$MAX_CREDITS"
+
+      - name: Check the site contains no secrets
+        if: steps.gate.outputs.run == 'true'
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: python3 tools/check_secrets.py site
+
+      - name: Upload Pages artifact
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - name: Keep the schedule alive
+        if: steps.gate.outputs.run == 'true' && github.event_name == 'schedule'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/scan.yml/enable" --silent
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

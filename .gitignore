@@ -1,0 +1,22 @@
+# generated data / local state - never committed
+cache/
+output/
+site/
+logs/
+*.log
+*.jsonl
+report*.html
+*.png
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+# anything that could hold credentials
+.env
+.env.*
+*.key
+*.pem
+*secret*
+!tools/check_secrets.py
+.netrc

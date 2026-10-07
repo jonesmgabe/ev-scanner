@@ -1,0 +1,293 @@
+# +EV scanner configuration. Edit freely; CLI flags override these values.
+# The Odds API key is NOT stored here - it is read from the ODDS_API_KEY env var.
+
+[scan]
+min_ev_pct = 1.0              # only show bets with EV% above this
+devig_method = "power"        # "power" (default) or "multiplicative"
+kelly_multiplier = 0.25       # quarter Kelly
+max_kelly_pct = 5.0           # cap displayed stake (% of bankroll) - safety rail
+max_ev_pct = 25.0             # drop anything above this as a likely stale/bad line
+markets = ["h2h", "spreads", "totals"]
+sports = ["nfl", "ncaaf", "nba", "nhl", "mlb", "wnba"]
+skip_live = true              # ignore events that have already started
+max_fair_odds_age_min = 30    # ignore sharp prices whose market last_update is older than this
+
+[sharp]
+# Fair-odds references, in priority order. Each is de-vigged (power/multiplicative)
+# on the exact same line - including Novig, which is an exchange with little or no
+# vig, so devigging just removes any residual over/underround.
+references = ["pinnacle", "novig"]   # pinnacle = eu region, novig = us_ex region
+mode = "priority"             # "priority": first reference with the line (pinnacle, then novig)
+                              # "blend":    average de-vigged pinnacle + novig when both exist
+                              # CLI: --ref-mode priority|blend
+fallback = "consensus"        # if no reference has the exact market/line
+# Reference-only books: NEVER evaluated as a target or shown as a bet row
+# (Novig is used purely as a fair-odds reference). Enforced in the scanner too.
+never_target = ["novig"]
+# Per-reference overround cap: an exchange line whose implied probabilities sum
+# above this is a wide bid/ask (illiquid), not a price -> skip that reference for
+# that line and fall through to the next one. On 2026-10-07 Novig main markets had
+# a median implied sum of 1.015 (90th pct 1.047); its props median 1.069 (p90 1.26).
+max_implied_sum_by_ref = { novig = 1.05 }
+book = "pinnacle"             # legacy single-sharp setting (used only if `references` is absent)
+consensus_min_books = 3       # minimum books (excluding the target) for a consensus price
+min_implied_sum = 0.97        # reference lines outside this overround band are ignored
+max_implied_sum = 1.20        # (filters junk such as 1.01/1.01 quotes on illiquid exchanges)
+
+[api]
+odds_format = "decimal"
+cache_dir = "cache"
+cache_ttl_minutes = 10        # re-use cached odds younger than this (saves credits)
+max_credits_per_run = 60      # hard stop so a typo can't burn the monthly quota (CLI: --max-credits)
+max_bookmakers_per_call = 10  # 10 bookmakers = 1 "region" for billing
+skip_paid_only_books = true   # don't spend a bookmaker slot on paid-plan-only keys
+
+# Target books: where you want to place bets. key = The Odds API bookmaker key.
+# covered = false -> not available in The Odds API (kept here for documentation).
+[[target_books]]
+name = "DraftKings"
+key = "draftkings"
+region = "us"
+covered = true
+
+[[target_books]]
+name = "FanDuel"
+key = "fanduel"
+region = "us"
+covered = true
+
+[[target_books]]
+name = "Caesars"
+key = "williamhill_us"
+region = "us"
+covered = true
+paid_only = true              # The Odds API only returns this on paid plans
+
+[[target_books]]
+name = "theScore Bet (ex-ESPN BET)"
+key = "espnbet"
+region = "us2"
+covered = true
+
+[[target_books]]
+name = "Kalshi"
+key = "kalshi"
+region = "us_ex"
+covered = true
+
+[[target_books]]
+name = "Polymarket"
+key = "polymarket"
+region = "us_ex"
+covered = true
+
+[[target_books]]
+name = "ProphetX"
+key = "prophetx"
+region = "us_ex"
+covered = true
+
+[[target_books]]
+name = "DraftKings Pick6"
+key = "pick6"
+region = "us_dfs"
+covered = true
+props_only = true             # DFS pick'em: player props only, fixed payouts (see [dfs.pick6])
+
+[[target_books]]
+name = "PrizePicks"
+key = "prizepicks"
+region = "us_dfs"
+covered = true
+props_only = true             # see [dfs.prizepicks]
+
+[[target_books]]
+name = "Underdog"
+key = "underdog"
+region = "us_dfs"
+covered = true
+props_only = true             # see [dfs.underdog]
+
+[[target_books]]
+name = "Dabble"
+key = "dabble_us_dfs"
+region = "us_dfs"
+covered = true
+props_only = true             # see [dfs.dabble_us_dfs]; listed in the API but had no NFL props on 2026-10-07
+
+[[target_books]]
+name = "Fliff"
+key = "fliff"
+region = "us2"
+covered = true                # social/sweepstakes sportsbook with real odds (not pick'em) -> normal EV maths
+
+[[target_books]]
+name = "Courtside"
+key = "courtside"
+region = "us2"
+covered = true
+paid_only = true              # social/sweepstakes sportsbook; The Odds API serves its odds on paid plans only
+
+# --- not available in The Odds API (kept for documentation; see COVERAGE.md)
+[[target_books]]
+name = "Sportzino"
+key = ""
+region = ""
+covered = false
+
+[[target_books]]
+name = "Betr Picks"
+key = ""                      # only "betr_au" (Australian sportsbook) exists in the API
+covered = false
+
+[[target_books]]
+name = "Sleeper Picks"
+key = ""
+covered = false
+
+[[target_books]]
+name = "ParlayPlay"
+key = ""
+covered = false
+
+[[target_books]]
+name = "Chalkboard"
+key = ""
+covered = false
+
+[[target_books]]
+name = "Boom Fantasy"
+key = ""
+covered = false
+
+[[target_books]]
+name = "Vivid Picks"
+key = ""
+covered = false
+
+# ---------------------------------------------------------------------------
+# DFS pick'em payout tables. Each leg is compared with the LOWEST per-leg
+# break-even among the listed entries (up to max_legs). Multipliers include the
+# stake. Format: power = { legs = multiplier }, flex = { legs = { hits = mult } }.
+# !!! Payouts change and can vary by state/promo/pick tier - VERIFY IN THE APP
+# !!! and edit these numbers before relying on them.
+# ---------------------------------------------------------------------------
+[dfs.prizepicks]
+source = "oddsreference.com/dfs/pickem/pickem-platform-comparison (verified there 2026-07-19); 6-pick flex from oddsassist.com/dfs/dabble-vs-prizepicks"
+verify_note = "Verify in the PrizePicks app before use."
+max_legs = 6
+power = { 2 = 3.0, 3 = 5.0, 4 = 10.0, 5 = 20.0, 6 = 25.0 }
+flex = { 3 = { 3 = 2.25, 2 = 1.25 }, 4 = { 4 = 5.0, 3 = 1.5 }, 5 = { 5 = 10.0, 4 = 2.0, 3 = 0.4 }, 6 = { 6 = 25.0, 5 = 2.0, 4 = 0.4 } }
+
+[dfs.pick6]
+source = "oddsreference.com/dfs/pickem/pickem-platform-comparison (verified there 2026-07-19)"
+verify_note = "Base Payout only; Pick6 is peer-to-peer and Extra Winnings can add to it (so this is conservative). Verify in the app."
+max_legs = 6
+power = { 2 = 3.0, 3 = 5.0, 4 = 10.0, 5 = 18.0, 6 = 20.0 }
+flex = { 3 = { 3 = 2.25, 2 = 1.25 }, 4 = { 4 = 5.0, 3 = 1.5 }, 5 = { 5 = 8.0, 4 = 1.5, 3 = 0.4 } }
+
+[dfs.underdog]
+source = "oddsreference.com/dfs/pickem/pickem-platform-comparison (verified there 2026-07-19)"
+verify_note = "Standard (non-Scorcher) picks; 7-8 pick tiers exist (50x/100x) but are beyond max_legs. Verify in the Underdog app."
+max_legs = 6
+power = { 2 = 3.0, 3 = 6.0, 4 = 10.0, 5 = 20.0, 6 = 35.0 }
+flex = { 3 = { 3 = 2.5, 2 = 1.25 }, 4 = { 4 = 5.0, 3 = 1.5 }, 5 = { 5 = 10.0, 4 = 2.0, 3 = 0.5 } }
+
+[dfs.dabble_us_dfs]
+source = "Dabble Help Center, 'Payout Calculations for Voided or Adjusted Picks' (help.dabblefantasy.com, updated 2026-09-03), All-In pay scale"
+verify_note = "All-In only (Hedge table on that page is not machine-readable). 7-12 pick tiers (80x..1500x) exist beyond max_legs. Verify in the Dabble app."
+max_legs = 6
+power = { 2 = 3.0, 3 = 6.0, 4 = 10.0, 5 = 20.0, 6 = 40.0 }
+
+# Extra books fetched only to build a consensus fair price when the sharp book
+# is missing. They fill the remaining bookmaker slots (up to 10 total = 1 credit/market).
+[consensus]
+books = ["betonlineag", "betmgm", "lowvig", "betrivers", "bovada"]   # novig is now a reference (above)
+
+# Exchange fees applied to the target price before computing EV (taker orders).
+# taker_p1p: fee per contract = rate * p * (1 - p)   (p = contract price in $)
+[fees.kalshi]
+type = "taker_p1p"
+rate = 0.07       # Kalshi standard taker coefficient
+
+[fees.polymarket]
+type = "taker_p1p"
+rate = 0.0695     # Polymarket US taker theta (effective Sep 17 2026)
+
+# ProphetX: no fee applied - verify your account's commission and set e.g.
+# [fees.prophetx]
+# type = "winnings_commission"
+# rate = 0.02
+
+# Player props (per-event endpoint; cost = markets returned x regions, per event).
+# Bookmakers requested for props = sharp + covered target books (incl. DFS) +
+# consensus books, capped at max_bookmakers_per_call so each call bills as 1 region.
+[props]
+enabled = false               # CLI: --props
+max_events = 3                # per sport, soonest first (CLI: --max-events)
+consensus_min_books = 2       # min other books at the exact player+line if Pinnacle lacks it
+consensus_books = ["betmgm", "betrivers"]   # fill leftover bookmaker slots (props)
+skip_books = ["kalshi", "polymarket", "dabble_us_dfs"]
+# kalshi: alternate props only; polymarket: anytime-TD only (junk 1.01 quotes);
+# dabble_us_dfs: listed but had no NFL props on 2026-10-07 - dropped to make room
+# for the novig reference while staying at 10 bookmakers (= 1 credit per market).
+# Remove dabble_us_dfs from this list (and drop another book) to scan Dabble again.
+dfs_min_edge_pct = 0.5        # DFS legs: min per-leg edge vs best entry break-even
+
+[props.markets]
+nfl   = ["player_pass_yds", "player_rush_yds", "player_reception_yds", "player_receptions", "player_pass_tds", "player_anytime_td"]
+ncaaf = ["player_pass_yds", "player_rush_yds", "player_reception_yds", "player_receptions", "player_pass_tds", "player_anytime_td"]
+nba   = ["player_points", "player_rebounds", "player_assists", "player_threes", "player_points_rebounds_assists"]
+wnba  = ["player_points", "player_rebounds", "player_assists", "player_threes", "player_points_rebounds_assists"]
+nhl   = ["player_points", "player_shots_on_goal", "player_goals"]
+mlb   = ["batter_hits", "batter_total_bases", "pitcher_strikeouts", "batter_home_runs"]
+
+[sport_keys]
+nfl = "americanfootball_nfl"
+ncaaf = "americanfootball_ncaaf"
+nba = "basketball_nba"
+nhl = "icehockey_nhl"
+mlb = "baseball_mlb"
+wnba = "basketball_wnba"
+nba_preseason = "basketball_nba_preseason"
+cfl = "americanfootball_cfl"
+
+# =============================================================================
+# LIVE SITE (GitHub Actions -> GitHub Pages)
+# Cadence + credit caps live in THIS section and in the cron lines of
+# .github/workflows/scan.yml (run `python3 site_run.py crons` to print the cron
+# lines that match slots_et). See README "When you upgrade the API".
+# =============================================================================
+[site]
+slots_et = ["10:20", "12:20", "18:10"]   # scheduled runs, ET: late morning / before 1 PM slate / before 7 PM slate
+window_hours = 36                        # a sport is a candidate only if it has a game starting within this window
+sports = ["nfl", "ncaaf", "nba", "nhl", "mlb", "wnba"]   # candidates (list order breaks ties)
+# rotation: each run scores sports by hours-since-last-refresh x weight and refreshes the stalest first
+sport_weight = { nfl = 1.0, ncaaf = 0.9, nba = 0.9, nhl = 0.7, mlb = 0.8, wnba = 0.6 }
+main_markets = ["h2h", "spreads", "totals"]   # 1 credit per market per sport (10 bookmakers = 1 region)
+max_main_sports_per_run = 6
+props_sports = ["nfl", "nba", "nhl", "mlb", "wnba"]
+props_reserve_credits = 2      # held back from main markets for props when a prop game is in the window
+max_prop_events_per_run = 1    # soonest games first; games refreshed < prop_refresh_hours ago go last
+prop_refresh_hours = 6
+carry_over_hours = 24          # bets from earlier runs (sports not refreshed now) stay up to this age, labelled
+min_ev_pct = 1.0
+
+[site.prop_markets]            # 1 credit per market per game - kept small on the free plan
+nfl  = ["player_reception_yds", "player_rush_yds"]
+nba  = ["player_points", "player_rebounds"]
+wnba = ["player_points", "player_rebounds"]
+nhl  = ["player_shots_on_goal", "player_points"]
+mlb  = ["pitcher_strikeouts", "batter_total_bases"]
+
+[budget]
+# Budget guard (reads x-requests-used/remaining from the free /sports call before each run).
+# Per-run cap = min(max_credits_per_run, what's left today under max_credits_per_day,
+#                   (remaining - reserve_credits) / scheduled runs left until the quota resets).
+# If that is below min_run_credits the run is skipped and the last good report is republished.
+max_credits_per_run = 5
+max_credits_per_day = 15       # 3 runs x 5 = 15/day -> ~450-465 per full month (free plan = 500)
+reserve_credits = 25           # never touched by scheduled runs (manual scans, mistakes)
+min_run_credits = 1            # 1 = allow shrinking to a moneyline-only run before skipping
+quota_reset_day = 1            # day of month the quota resets (check your account page; 00:00 UTC assumed)
+monthly_quota = 500            # informational; the guard uses used+remaining from the API headers
