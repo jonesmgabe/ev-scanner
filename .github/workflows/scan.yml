@@ -22,6 +22,22 @@ on:
         description: "Credit cap for this manual run (0 = config [budget].max_credits_per_run; the reserve is always kept)"
         required: false
         default: "0"
+      sports:
+        description: "Only these sports, e.g. nfl (blank = normal rotation)"
+        required: false
+        default: ""
+      props_sports:
+        description: "Props only for these sports, e.g. nfl; 'none' skips props (blank = config)"
+        required: false
+        default: ""
+      max_prop_events:
+        description: "How many soonest games get props (blank = config, usually 1)"
+        required: false
+        default: ""
+      prop_markets:
+        description: "Override prop market keys, comma list (blank = config)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -72,8 +88,12 @@ jobs:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           EVENT: ${{ github.event_name }}
           MAX_CREDITS: ${{ github.event.inputs.max_credits || '0' }}
+          SPORTS: ${{ github.event.inputs.sports || '' }}
+          PROPS_SPORTS: ${{ github.event.inputs.props_sports || '' }}
+          MAX_PROP_EVENTS: ${{ github.event.inputs.max_prop_events || '' }}
+          PROP_MARKETS: ${{ github.event.inputs.prop_markets || '' }}
           SITE_URL: ${{ steps.pages.outputs.base_url }}
-        run: python3 site_run.py build --out site --prev-url "$SITE_URL" --event "$EVENT" --max-credits "$MAX_CREDITS"
+        run: python3 site_run.py build --out site --prev-url "$SITE_URL" --event "$EVENT" --max-credits "$MAX_CREDITS" --sports "$SPORTS" --props-sports "$PROPS_SPORTS" --max-prop-events "$MAX_PROP_EVENTS" --prop-markets "$PROP_MARKETS"
 
       - name: Check the site contains no secrets
         if: steps.gate.outputs.run == 'true'

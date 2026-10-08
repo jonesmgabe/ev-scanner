@@ -146,6 +146,23 @@ def budget_cap(cfg, used, remaining, now, runs_log, manual_cap=None) -> dict:
 
 
 # --------------------------------------------------------------------------- plan
+def apply_manual_scope(cfg, sports: str | None, props_sports: str | None, max_prop_events: int | None,
+                        prop_markets: str | None = None) -> None:
+    """A manual run can pin the sports and the props window. Blank = config defaults."""
+    site = cfg["site"]
+    if sports:
+        site["sports"] = [x.strip() for x in sports.split(",") if x.strip()]
+    if props_sports is not None and props_sports.strip() != "":
+        site["props_sports"] = [] if props_sports.strip().lower() == "none" else [
+            x.strip() for x in props_sports.split(",") if x.strip()]
+    if max_prop_events is not None:
+        site["max_prop_events_per_run"] = max_prop_events
+    if prop_markets:
+        mk = [x.strip() for x in prop_markets.split(",") if x.strip()]
+        for sport in site.get("props_sports") or []:
+            site.setdefault("prop_markets", {})[sport] = mk
+
+
 def make_plan(cfg, api: OddsAPI, active: set[str], cap: int, state: dict, now: datetime) -> dict:
     site = cfg["site"]
     keymap = cfg["sport_keys"]
@@ -243,6 +260,8 @@ def logic_fingerprint(cfg) -> str:
 def build(a, cfg) -> int:
     now = datetime.now(UTC)
     site = cfg["site"]
+    apply_manual_scope(cfg, getattr(a, "sports", None), getattr(a, "props_sports", None),
+                       getattr(a, "max_prop_events", None), getattr(a, "prop_markets", None))
     cfg["scan"]["min_ev_pct"] = site.get("min_ev_pct", cfg["scan"]["min_ev_pct"])
     prev = load_prev(a.prev_url, a.prev_file)
     logic = logic_fingerprint(cfg)
@@ -433,10 +452,18 @@ def main(argv=None) -> int:
     ap.add_argument("--prev-url", help="published site base URL (to carry over bets and state)")
     ap.add_argument("--prev-file", help="local site_data.json instead of --prev-url")
     ap.add_argument("--max-credits", type=int, help="manual run: override the per-run cap (reserve still kept)")
+    ap.add_argument("--sports", default="", help="manual: only these sports (comma list)")
+    ap.add_argument("--props-sports", default="", help="manual: props sports, or 'none'")
+    ap.add_argument("--max-prop-events", default="", help="manual: soonest games to pull props for")
+    ap.add_argument("--prop-markets", default="", help="manual: override prop market keys")
     ap.add_argument("--offline", action="store_true", help="cached data only (testing)")
     a = ap.parse_args(argv)
     if a.max_credits is not None and a.max_credits <= 0:
         a.max_credits = None
+    a.sports = (a.sports or "").strip()
+    a.props_sports = (a.props_sports or "").strip()
+    a.max_prop_events = int(a.max_prop_events) if str(a.max_prop_events or "").strip() else None
+    a.prop_markets = (a.prop_markets or "").strip()
     cfg = ev.load_config(Path(a.config))
     if a.cmd == "crons":
         print("\n".join(cron_lines(cfg)))
