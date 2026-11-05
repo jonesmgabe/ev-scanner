@@ -25,6 +25,16 @@ python -m unittest tests/test_ev_math.py -v           # math tests
 
 Requires Python 3.11+ and `requests`. The HTML report has no other dependencies.
 
+## Arbitrage (NBA player props)
+
+FanDuel vs Kalshi / Polymarket prop arbs — see **[ARB.md](ARB.md)**.
+
+```bash
+python3 -m evtool.arb --once --sport nba --fd-source fixture --exchanges live
+python3 -m unittest tests/test_arb_math.py -v
+```
+
+
 Outputs:
 - the terminal table (ranked by EV%)
 - `report.html`, a static dark-themed report you can sort by any column and filter by sport, book,
