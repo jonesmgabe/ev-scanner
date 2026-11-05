@@ -267,28 +267,21 @@ def fetch_polymarket_nba_props(
                 player = mm.group(1).strip() if mm else question.split(":")[0].strip()
             if player is None or point is None:
                 continue
-            prices = m.get("outcomePrices")
-            outcomes = m.get("outcomes")
-            if isinstance(prices, str):
-                try:
-                    prices = json.loads(prices)
-                except json.JSONDecodeError:
-                    continue
-            if isinstance(outcomes, str):
-                try:
-                    outcomes = json.loads(outcomes)
-                except json.JSONDecodeError:
-                    outcomes = ["Yes", "No"]
-            if not prices or len(prices) < 2:
+            # Taker quotes: Gamma bestAsk/bestBid are for the Yes (Over) token.
+            # outcomePrices are mids and invent phantom arbs when the book is wide.
+            yes_ask = _float_or_none(m.get("bestAsk"))
+            yes_bid = _float_or_none(m.get("bestBid"))
+            if (
+                yes_ask is None
+                or yes_bid is None
+                or not (0.0 < yes_bid < yes_ask < 1.0)
+            ):
                 continue
-            # Yes = Over, No = Under on Polymarket player O/U
-            side_map = {"Yes": "Over", "No": "Under", "Over": "Over", "Under": "Under"}
+            # Buy Over at Yes ask; buy Under at No ask ≈ 1 - Yes bid on a binary book.
+            side_prices = {"Over": yes_ask, "Under": 1.0 - yes_bid}
             liq = _float_or_none(m.get("liquidityNum") or m.get("liquidity"))
-            for i, outcome in enumerate(outcomes[:2]):
-                side = side_map.get(str(outcome), None)
-                if side is None:
-                    continue
-                dec = dollars_to_decimal(prices[i])
+            for side, price in side_prices.items():
+                dec = dollars_to_decimal(price)
                 if dec is None:
                     continue
                 out.append(PropQuote(

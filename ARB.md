@@ -27,6 +27,9 @@ Kalshi `KXNBABLK` / `KXNBASTL` / `KXNBASTOCK`, Polymarket `blocks` / `steals`.
    first initial. Unmatched quotes are skipped.
 4. Kickoff / event labels are informational only for props v1 (player+line is enough).
 
+Polymarket quotes use Gamma `bestAsk` (Yes/Over) and `1 - bestBid` (No/Under),
+not `outcomePrices` mids. Wide books previously produced fake 20%+ arbs.
+
 ## Fees
 
 Uses `config.toml` `[fees.kalshi]` / `[fees.polymarket]` (`taker_p1p`) via
