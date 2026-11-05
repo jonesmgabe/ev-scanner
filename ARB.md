@@ -120,3 +120,11 @@ Sportsbook side is now **FanDuel and/or DraftKings**; exchange side is Kalshi/Po
 python3 -m evtool.arb --once --fd-source fixture --exchanges fixture            # both books, 0 credits
 python3 -m evtool.arb --once --fd-source api --max-events 1 --exchanges live    # live, both books
 ```
+
+## Scheduled runs
+
+`.github/workflows/scan.yml` runs `python3 -m evtool.arb --fd-source api --exchanges live --max-events 1`
+in the 6:10 PM ET slot (pre-tip for NBA) and on manual dispatch. Output is published under
+`site/arb/` (live at https://jonesmgabe.github.io/ev-scanner/arb/). The step is
+`continue-on-error`, uses the `ODDS_API_KEY` secret (never printed), costs only the props
+credits for one game, and runs before the site secret check. Never places trades; Novig is never a target.

@@ -95,6 +95,13 @@ jobs:
           SITE_URL: ${{ steps.pages.outputs.base_url }}
         run: python3 site_run.py build --out site --prev-url "$SITE_URL" --event "$EVENT" --max-credits "$MAX_CREDITS" --sports "$SPORTS" --props-sports "$PROPS_SPORTS" --max-prop-events "$MAX_PROP_EVENTS" --prop-markets "$PROP_MARKETS"
 
+      - name: NBA prop arb scan (evening pre-tip slot only)
+        if: steps.gate.outputs.run == 'true' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '10 22 * * *' || github.event.schedule == '10 23 * * *')
+        continue-on-error: true
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: python3 -m evtool.arb --once --sport nba --fd-source api --exchanges live --max-events 1 --out site/arb
+
       - name: Check the site contains no secrets
         if: steps.gate.outputs.run == 'true'
         env:
