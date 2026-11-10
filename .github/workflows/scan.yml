@@ -102,6 +102,20 @@ jobs:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: python3 -m evtool.arb --once --sport nba --fd-source api --exchanges live --max-events 1 --out site/arb
 
+      - name: Keep the last NBA arb board when this run did not scan arbs
+        if: steps.gate.outputs.run == 'true'
+        continue-on-error: true
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          if [ ! -f site/arb/arbs.html ]; then
+            mkdir -p site/arb
+            for f in arbs.html arbs.json arbs.csv; do
+              curl -fsSL "${SITE_URL%/}/arb/$f" -o "site/arb/$f" || rm -f "site/arb/$f"
+            done
+            ls -la site/arb || true
+          fi
+
       - name: Check the site contains no secrets
         if: steps.gate.outputs.run == 'true'
         env:
